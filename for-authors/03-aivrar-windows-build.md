@@ -18,13 +18,26 @@ needs nothing but `pip`, and we put the whole working set in one place.
 | `vllm_quantpack-0.1.5+win.1` | Jorge's plugin with four fixes (his fast int4 kernel disables itself on Western Windows code pages — one warning, 28 vs 85 tok/s decode) |
 | `https://github.com/Astemiir/qwen38-27b-windows-vllm/bundle` | all four wheels plus `install.bat`, which installs them into a kit and verifies that a prebuilt kernel loads |
 
-Measured on a 3090 with your kit, `fp8_e4m3` + `--attention-backend FLASHINFER`, 131 072 window: 1 182
-tok/s prefill and 81.8 tok/s decode, versus 828 / 76.0 on the stock Triton int8 path. With `int4` KV from
-the plugin: 262 144 tokens of context in 6.8 GB, 1 178 / 85.5 at a 33k fill.
+Measured on your kit, RTX 3090, 33 367-token fill, 500-token answer, MTP n3 — five arms, so the port's
+share is visible rather than implied:
 
-Worth noting for your docs: **fp8 KV works without the plugin at all** — your kit plus our FlashInfer
-wheels and `--kv-cache-dtype fp8_e4m3 --attention-backend FLASHINFER` is enough. The plugin is only needed
-for int4/k8v4 and for the int8 prefill path.
+| arm                                                                 | prefill, tok/s | decode, tok/s | window   |
+| ------------------------------------------------------------------- | -------------- | ------------- | -------- |
+| `int8_per_token_head`, Triton, stock                                | 828            | 76.0          | 131 072  |
+| `int8_per_token_head`, Triton, + the plugin's int8 prefill hook      | **1 172**      | 76.0          | 131 072  |
+| `fp8_e4m3`, FlashInfer (our wheels)                                 | 1 182          | **81.8**      | 131 072  |
+| `int4_per_token_head`, Triton, plugin launcher                       | **1 178**      | **85.5**      | 262 144  |
+| `bfloat16`, Triton, stock                                           | 1 038          | 85.4          | 65 536   |
+
+Two things in that table are worth a line in your docs. **The prefill win is not the port**: with the
+plugin's int8 prefill hook in place, stock Triton matches FlashInfer, 1 172 against 1 182. **Decode is a
+cache-format story, not a backend one** — `bfloat16` on stock Triton already decodes at 85.4, int4 from
+the plugin at 85.5, while the int8 path sits at 76.0 patched or not. What FlashInfer still owns on this
+card is fp8 KV, which Triton refuses below SM89, and the +7.6 % decode over the *unpatched* int8 path.
+
+Also worth noting: **fp8 KV works without the plugin at all** — your kit plus our FlashInfer wheels and
+`--kv-cache-dtype fp8_e4m3 --attention-backend FLASHINFER` is enough. The plugin is needed for int4/k8v4
+and for the int8 prefill path.
 
 ## 2. The two documentation lines, again
 
@@ -45,13 +58,15 @@ for example:
 ```
 
 `docs/troubleshooting.md` — after `### A .gguf model fails with UTF-8 or invalid JSON errors`
-(master:164), two sections, both about failures that produce no error:
+(master:164), one section, about a failure that produces no error:
 
-- **`int4_per_token_head` decodes at ~28 tok/s** — the plugin writes a generated CUDA source through
-  `os.fdopen(fd, "w")`, which uses the ANSI code page; the source contains U+2192, which no Western code
-  page can encode, so the fast kernel is skipped and one warning says `attention left stock`. Fix the
-  encoding, then pass `--max-num-seqs 8` — with fewer sequences than `1 + num_speculative_tokens` the
-  split-KV path is skipped as well. Both together: 28 → 85.5 tok/s.
+- **`int4_per_token_head` with speculative decoding decodes at ~28 tok/s** — no error, correct answers,
+  simply the 2D unpack kernel: the packed launcher only takes the 3D split-KV path when
+  `max_seqlen_q <= 1`, so a step carrying `1 + num_speculative_tokens` rows stays on the slow path and no
+  launch flag changes it (28.0 at `--max-num-seqs 2`, 29.3 at 8, same 33k fill). A faster multi-query
+  split-KV launcher exists in the `vllm-quantpack` plugin, which is where this belongs rather than in the
+  kit's docs — with the plugin's encoding fixed (U+2192 written through the ANSI code page) and
+  `--max-num-seqs 8` the same stand gives 85.5.
 - **`FP8 KV cache is not supported by the Triton attention backend … requires SM89+`** — the guard is one
   predicate too wide for `fp8_per_token_head` (that dtype dequantizes with per-token scales, it does not
   need native fp8 tensor cores). Either use `--attention-backend FLASHINFER`, or widen the condition with

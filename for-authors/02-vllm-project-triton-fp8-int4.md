@@ -65,23 +65,27 @@ FlashInfer" is a perfectly good answer; we would then just stop advertising the 
 ```
 
 The comment says the exclusion is deliberate, which is why this is a question and not a patch. What we
-measure on a 3090 with MTP n3 and a 6.8 GB int4 cache, same prompt and same model:
+measure on a 3090 with MTP n3 and a 6.8 GB int4 cache, same model and same prompt:
 
-| launch flag        | decode, tok/s |
-| ------------------ | ------------- |
-| `--max-num-seqs 2` | 23.6          |
-| `--max-num-seqs 8` | 85.5          |
+| run                                                          | decode, tok/s |
+| ------------------------------------------------------------ | ------------- |
+| stock vLLM, `--max-num-seqs 2`                               | 28.0          |
+| stock vLLM, `--max-num-seqs 8`                               | 29.3          |
+| third-party int4 launcher (`vllm-quantpack`), `--max-num-seqs 2` | 23.6      |
+| third-party int4 launcher (`vllm-quantpack`), `--max-num-seqs 8` | 85.5      |
 
-So the batch size decides whether the fast split-KV decode runs, and nothing says so at runtime. Two
-questions:
+On stock vLLM the batch size changes nothing. The dispatch in `v1/attention/ops/int4_per_token_head.py`
+also requires `max_seqlen_q <= 1`, so with `1 + num_speculative_tokens` = 4 query rows per step the 2D
+kernel runs at any `max_num_seqs`; the 3D branch that the scratch above sizes is never reached. The
+23.6 → 85.5 pair is the third-party launcher, which overrides that dispatch and does split-KV over
+multi-query batches — its scratch holds one row per sequence, so below `1 + num_speculative_tokens` it
+declines and falls back. Two questions:
 
 1. Is "multi-query batches in 2D only" a temporary limitation of the int4 launch path, or a permanent
-   property? If permanent, a `logger.warning_once` from the 3D branch — "int4 decode carries
-   `1 + num_speculative_tokens` rows per sequence and loses the split-KV path" — would have saved us a
-   day of measuring the wrong thing.
-2. Is there an intended way to keep the split-KV path under speculation (minimum batch, scratch override,
-   kernel flag), or is `--max-num-seqs ≥ 1 + num_speculative_tokens` the answer by design? If it is, that
-   constraint is worth one line in the docs next to `--kv-cache-dtype`.
+   property? If permanent, a `logger.warning_once` — "int4 decode carries `1 + num_speculative_tokens`
+   rows per sequence and stays on the 2D kernel" — would have saved us a day of measuring the wrong thing.
+2. If permanent, is a split-KV path for int4 under speculation planned, or is the 2D kernel the intended
+   answer and a third-party launcher the only way around it?
 
 Background, if useful: `https://github.com/Astemiir/qwen38-27b-windows-vllm` — `PERFORMANCE.md` has the full table of KV formats on this card, and
 `UPSTREAM-FIXES.md` §2 is the same text with the measurements attached. The int4/k8v4 kernels themselves

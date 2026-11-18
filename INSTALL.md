@@ -224,10 +224,11 @@ python\python.exe -m vllm.entrypoints.openai.api_server ^
 
 Two flags are not optional and are easy to get wrong:
 
-- **`--max-num-seqs 8`** for `int4`. The 3D split-KV scratch is sized from `max_num_seqs` with one
-  query row per sequence for this dtype; a speculative step carries `1 + num_speculative_tokens` rows.
-  With `--max-num-seqs 2` the launcher silently falls back to the 2D path and decode drops from
-  85.5 to 28.0 tok/s — with no error in the log.
+- **`--max-num-seqs 8`** for `int4`. The plugin's launcher sizes its 3D split-KV scratch from
+  `max_num_seqs` with one query row per sequence for this dtype; a speculative step carries
+  `1 + num_speculative_tokens` rows. With `--max-num-seqs 2` it silently falls back to the 2D path and
+  decode drops from 85.5 to 28.0 tok/s — with no error in the log. (Stock vLLM cannot take that path at
+  all under speculation, so the flag only matters with the plugin in place.)
 - **`PYTORCH_CUDA_ALLOC_CONF` empty.** `expandable_segments` aborts startup on Windows with a GPU
   mapping OOM. If you inherited it from another setup, clear it.
 

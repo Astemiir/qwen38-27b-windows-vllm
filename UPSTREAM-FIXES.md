@@ -78,22 +78,34 @@ needed — we would rather point at yours.
         ):
 ```
 
-**What we measured.** With `num_speculative_tokens = 3` and `int4_per_token_head`, decode is 23.6 tok/s
-at `--max-num-seqs 2` and 85.5 tok/s at `--max-num-seqs 8` — same model, same prompt, same 6.8 GB cache.
+**What we measured.** With `num_speculative_tokens = 3` and `int4_per_token_head`, the launch flag is what
+decides whether the fast decode runs — but only with the third-party launcher in place:
+
+| run                                                             | decode, tok/s |
+| --------------------------------------------------------------- | ------------- |
+| stock vLLM, `--max-num-seqs 2`                                  | 28.0          |
+| stock vLLM, `--max-num-seqs 8`                                  | 29.3          |
+| third-party int4 launcher (`vllm-quantpack`), `--max-num-seqs 2` | 23.6         |
+| third-party int4 launcher (`vllm-quantpack`), `--max-num-seqs 8` | 85.5         |
+
 The comment above the condition says the exclusion is deliberate, which is why this item is written as a
-question and not as a patch: the 2D path is clearly the slow one on Ampere, and something about a larger
-`max_num_seqs` gets us off it, but we cannot tell from the code whether that is intended.
+question and not as a patch: on stock vLLM the 2D kernel is the only path a speculative step can take
+(`use_3d` in `v1/attention/ops/int4_per_token_head.py` also needs `max_seqlen_q <= 1`), while the plugin's
+launcher overrides that dispatch, does split-KV over multi-query batches and declines below
+`1 + num_speculative_tokens` rows of scratch. We had attributed the 23.6 → 85.5 pair to vLLM's 3D branch
+in the first version of this text; the stock pair is 28.0 → 29.3.
 
 **Two questions for the maintainers:**
 
 1. Is "multi-query batches in 2D only" a limitation of the int4 launch path that is expected to be lifted,
-   or a permanent property? If permanent, the 3D branch could `logger.warning_once` that int4 decode
-   carries `1 + num_speculative_tokens` rows per sequence and loses the split-KV path.
-2. Is there an intended way to keep the split-KV path under speculation — a minimum batch, a scratch
-   override, or a kernel flag — or is `--max-num-seqs ≥ 1 + num_speculative_tokens` the answer by design?
+   or a permanent property? If permanent, a `logger.warning_once` that int4 decode carries
+   `1 + num_speculative_tokens` rows per sequence and stays on the 2D kernel would help.
+2. If permanent, is a split-KV path for int4 under speculation planned, or is the 2D kernel the intended
+   answer and a third-party launcher the only way around it?
 
-Until that is settled the workaround is a launch flag, documented in `INSTALL.md`: `--max-num-seqs 8`.
-Worth knowing that it also costs nothing: at 8 sequences the 262k stand held 319 815 tokens of cache.
+On stock vLLM no launch flag changes this; `--max-num-seqs 8` is our bundle's setting because the plugin's
+launcher is what reads that scratch size. It costs nothing: at 8 sequences the 262k stand held 319 815
+tokens of cache.
 
 ## 3. `vllm-project/vllm` — fp8 KV with per-token-head scales is rejected on `sm_86`
 
@@ -160,22 +172,18 @@ from source with a Linux toolchain.
 
 ### 4b. `troubleshooting.md`
 
-Add two sections, because both failures are silent and both cost hours:
+Add two sections, because both failures are silent:
 
-> ### Decode is much slower than expected with `int4_per_token_head`
+> ### `int4_per_token_head` with speculative decoding decodes at about a third of the speed
 >
-> Two independent gates keep this dtype on the stock kernel. First, the plugin writes a generated CUDA
-> source through `os.fdopen(fd, "w")`, which uses the ANSI code page; the source contains U+2192, which
-> no Western code page can encode. The write fails, the error is swallowed, and the log says
-> `int4_per_token_head attention left stock`. Fix: pass `encoding="utf-8"` in
-> `vllm_quantpack/attention/int4_kv.py:181`.
->
-> Second, the 3D split-KV scratch is `max_num_seqs × 1` rows, while a speculative step needs
-> `1 + num_speculative_tokens`. With `--max-num-seqs 2` the launcher silently uses the 2D path:
-> 28 tok/s instead of 85. Pass `--max-num-seqs 8`.
->
-> On an RTX 3090 with both fixed: 1 178 tok/s prefill and 85.5 tok/s decode at a 33k fill, 262 144
-> tokens of context in 6.8 GB of KV.
+> No error, correct answers, but decode sits near 28 tok/s at a 33k fill on an RTX 3090 (MTP 3,
+> Qwen3.8-27B W4A16). The packed INT4 launcher only takes the 3D split-KV path when
+> `max_seqlen_q <= 1`, so speculative steps always run the 2D unpack kernel; `--max-num-seqs` does not
+> change it (29.3 tok/s at 8). A faster multi-query split-KV launcher exists in the `vllm-quantpack`
+> plugin, which is where this note applies rather than here: with that launcher and `--max-num-seqs 8`
+> the same stand gives 85.5. The plugin's own Windows bug — a generated source containing U+2192 written
+> through the ANSI code page, so its fast kernel stays off and the log says `attention left stock` — is a
+> separate report, kept with the plugin.
 
 > ### `FP8 KV cache is not supported by the Triton attention backend … requires SM89+`
 >
