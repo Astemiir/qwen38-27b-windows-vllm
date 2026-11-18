@@ -1,20 +1,19 @@
 # Qwen3.8-27B on one RTX 3090 under native Windows: 262k context, 1 178 tok/s prefill
 
-This repository is the missing pieces for running a Qwen3.8-27B model on a single 24 GB Ampere RTX3090 card 
-under **native Windows** (no WSL, no Linux container) at a **262 144-token context window**, 
-with speculative decoding: a Windows build of **FlashInfer 0.7.2.post1** with prebuilt `sm_80` kernels, 
-and a small patch set for the vLLM Windows build and for the quantization plugin it ships with.
+This repository makes a 27B model usable on one 24 GB card under native Windows, without WSL: **262 144
+tokens of context, 1 178 tok/s prefill, 85.5 tok/s decode**, installed from wheels.
 
-Two things are true at once, and it is worth being clear about both:
+Two things were in the way:
 
-- **Upstream Windows support stops well short of this.** The vLLM Windows build works, but it has no
-  FlashInfer, so `--kv-cache-dtype fp8` is unavailable and 131k does not fit at `bfloat16`.
-- **The fast int4 path is in a third-party plugin that disables itself on Windows.** It writes a
-  generated CUDA source file without an explicit encoding; on any Western Windows code page the write
-  fails and the engine falls back to its slow stock kernel. The only trace is one warning buried in a
-  300-line startup log — no error, no failed request, just three times slower decode.
+- **The Windows vLLM build has no FlashInfer.** Without it, `fp8` KV cache is unavailable, and 131k of
+  context does not fit at `bfloat16`.
+- **The fast int4 kernel lives in a third-party plugin that turns itself off on Windows.** It writes a
+  generated source file without an explicit encoding, the write fails on any Western Windows code page, and
+  the engine quietly runs the slow stock kernel: 28 tok/s decode instead of 85. One warning in a 300-line
+  startup log is the only trace.
 
-We fixed the second one, built the first one, and measured the result. That is what is here.
+We fixed the second one and built the first one. `ORIGIN.md` is the story step by step, `PERFORMANCE.md` is
+every number with the protocol behind it.
 
 ## What you get
 
