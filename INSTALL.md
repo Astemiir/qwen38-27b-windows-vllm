@@ -57,8 +57,9 @@ Expected: `0.33.0`, `2.14.0+cu130`, `13.0`.
 
 ## The one-folder path (what most people should do)
 
-Everything except the kit and the weights lives in `bundle/` in this repository, and it is also
-attached to the release, so there is nothing to fetch from four different places:
+Everything except the kit and the weights lives in `bundle/` in this repository, and the same eight files
+are attached to **[release v0.1-win.1](https://github.com/Astemiir/qwen38-27b-windows-vllm/releases/tag/v0.1-win.1)**,
+so there is nothing to fetch from four different places:
 
 ```
 bundle\
