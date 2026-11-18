@@ -71,3 +71,37 @@ so an isolated install has to be put on `sys.path` from inside the script.
 
 Measured timings on this machine: `norm` ≈ 20 s per object, `single_prefill` (bf16, head_dim 128) ≈ 6 objects
 × ~40 s with `--threads=1`.
+
+## Full AOT build
+
+`aot.compile_and_package_modules` (config: FA2 head dims 128 and 256, bf16/fp16 + fp8_e4m3, no sliding
+window, no soft cap) produced **33 modules** for `sm_80` in one run, and the resulting cache works as a
+provider wheel: `providers: 1`, `aot_artifacts: 1`, `try_load() -> Module` with 20 exports under
+`FLASHINFER_DISABLE_JIT=1`.
+
+Four extra things the AOT path needs beyond the five above:
+
+| item | symptom | fix |
+| --- | --- | --- |
+| `python3.lib` | `LNK1104: cannot open python3.lib` in the `spdlog` module | add `-L<kit>/python/libs` to `FLASHINFER_WIN_LDFLAGS` |
+| fmt literal | `character value is out of range` in `fmt/bundled/format.h:3273` | that `U"\x9999999a…"` literal exceeds `char32_t` range for nvcc; replaced with a `switch` returning the same constants |
+| MLA | `argument list for template … is missing` in `attention/mla.cuh` | not needed by the vLLM path; `FI_NO_MLA=1` skips the MLA specs (patch guard in `aot.py`) |
+| cuDNN FMHA | `expression must be a pointer to a complete object type` in `cudnn_sdpa_kernel_launcher.cu` | same: `FI_NO_CUDNN=1` skips it |
+
+Kernel-level timings of the built cache (RTX 3090, bf16, 8 heads × 128, no model weights — this measures
+attention only):
+
+| workload | time | tokens/s |
+| --- | --- | --- |
+| prefill, 33 000 tokens | 33.9 ms | 973 555 |
+| prefill, 246 000 tokens | 1 679 ms | 146 495 |
+| decode, 33k context (KV read) | 0.17 ms/token | 6 043 |
+| decode, 246k context (KV read) | 1.14 ms/token | 874 |
+
+Both decode points sit at ~800–880 GB/s of KV reads, i.e. at the card's memory bandwidth — the same ceiling
+that sets vLLM's decode at 85 tok/s at 33k once the 15.4 GB of weights are added to each step.
+
+The wheels built from that run: `dist/flashinfer_jit_cache_sm80-0.7.5rc3+win.1-cp39-abi3-win_amd64.whl`
+(27.5 MB, 33 modules) and the 3.4 KB discovery shim `flashinfer_jit_cache-0.7.5rc3+win.1-py3-none-any.whl`.
+Both must be installed together — without the shim the provider is invisible and `providers: 0`.
+
