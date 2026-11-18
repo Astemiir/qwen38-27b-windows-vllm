@@ -1,0 +1,12 @@
+# Wheels must be stored byte-for-byte.
+*.whl binary
+*.cuh binary
+
+# Unified diffs are applied by git/patch: no line-ending conversion, or the context lines stop matching.
+*.patch -text
+
+# Documents and scripts are LF in the repository; the one .bat is CRLF because cmd needs it.
+*.md    text eol=lf
+*.py    text eol=lf
+*.txt   text eol=lf
+*.bat   text eol=crlf

@@ -1,0 +1,263 @@
+diff --git a/vllm_quantpack/__init__.py b/vllm_quantpack/__init__.py
+index f13afc3..dc02a17 100644
+--- a/vllm_quantpack/__init__.py
++++ b/vllm_quantpack/__init__.py
+@@ -49,11 +49,14 @@ def register():
+     patch_embedding_layers(logger)
+ 
+     from .attention.int4_kv import patch_int4_kv
++    from .attention.int8_prefill import patch_int8_prefill, patch_int8_segments
+     from .attention.turboquant_kv import patch_turboquant_kv
+     from .exl3.spec_decode import patch_should_share
+     from .families import flint, nemotron, qwen, spark
+     patch_should_share(logger)
+     patch_int4_kv(logger)
++    patch_int8_prefill(logger)
++    patch_int8_segments(logger)
+     patch_turboquant_kv(logger)
+     qwen.register(logger)
+     if flint.register(logger):
+diff --git a/vllm_quantpack/attention/int4_kv.py b/vllm_quantpack/attention/int4_kv.py
+index d1d8b37..6d95024 100644
+--- a/vllm_quantpack/attention/int4_kv.py
++++ b/vllm_quantpack/attention/int4_kv.py
+@@ -178,7 +178,7 @@ def _load(src, name="int4_kv"):
+     path = os.path.join(base, f"{name}_{hashlib.sha256(src.encode()).hexdigest()[:16]}.py")
+     if not os.path.exists(path):
+         fd, tmp = tempfile.mkstemp(dir=base, suffix=".tmp")
+-        with os.fdopen(fd, "w") as fh:
++        with os.fdopen(fd, "w", encoding="utf-8") as fh:   # the kernel source carries non-ASCII comments
+             fh.write(src)
+         os.replace(tmp, path)   # atomic: tensor-parallel workers may write the same file at once
+     spec = importlib.util.spec_from_file_location(f"vllm_quantpack_{name}_generated", path)
+diff --git a/vllm_quantpack/attention/int4_prefill.py b/vllm_quantpack/attention/int4_prefill.py
+index 0699da3..6ecfed8 100644
+--- a/vllm_quantpack/attention/int4_prefill.py
++++ b/vllm_quantpack/attention/int4_prefill.py
+@@ -67,9 +67,37 @@ def _unpack_segment_i8(cache_ptr, scale_ptr, block_table_ptr, out_ptr, start, le
+     tl.store(out_ptr + t[:, None].to(tl.int64) * stride_o0 + h * stride_o1 + c[None, :], vals, mask=ok[:, None])
+ 
+ 
++@triton.jit
++def _unpack_segment_fp8(cache_ptr, scale_ptr, block_table_ptr, out_ptr, start, length,
++                        stride_c0, stride_c1, stride_c2, stride_s0, stride_s1, stride_s2,
++                        stride_o0, stride_o1,
++                        BLOCK_SIZE: tl.constexpr, HEAD: tl.constexpr, TOKENS: tl.constexpr):
++    """out[t, h, :] = e4m3 * scale for cache positions start + t (an fp8_per_token_head cache).
++
++    The cache itself is the uint8 storage viewed as float8 (vLLM does the same in _pth_key_value_caches), so the
++    load already widens the code to fp32 -- no bit tricks, unlike the int4 nibbles above."""
++    t = tl.program_id(0) * TOKENS + tl.arange(0, TOKENS)
++    h = tl.program_id(1)
++    ok = t < length
++    pos = start + t
++    blk = tl.load(block_table_ptr + pos // BLOCK_SIZE, mask=ok, other=0).to(tl.int64)
++    slot = pos % BLOCK_SIZE
++    c = tl.arange(0, HEAD)
++    codes = tl.load(cache_ptr + blk[:, None] * stride_c0 + slot[:, None] * stride_c1 + h * stride_c2 + c[None, :],
++                    mask=ok[:, None], other=0.0)
++    scale = tl.load(scale_ptr + blk * stride_s0 + slot * stride_s1 + h * stride_s2, mask=ok, other=0.0)
++    vals = (codes.to(tl.float32) * scale[:, None]).to(out_ptr.dtype.element_ty)
++    tl.store(out_ptr + t[:, None].to(tl.int64) * stride_o0 + h * stride_o1 + c[None, :], vals, mask=ok[:, None])
++
++
++FP8_DTYPES = tuple(d for d in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e5m2", None))
++                   if d is not None)
++
++
+ def unpack_segment(cache, scales, block_row, start, length, out):
+     """Unpack cache positions [start, start + length) of one sequence into out[:length] (L, KV heads, head size).
+-    An int8 cache view holds one code per channel (k8v4 keys); a uint8 one, two nibbles per byte."""
++    An int8 cache view holds one code per channel (k8v4 keys), an fp8 one holds one e4m3 code per channel, and a
++    uint8 one holds two int4 nibbles per byte."""
+     nkv, head = cache.shape[2], out.shape[2]
+     tokens = 16
+     strides = (cache.stride(0), cache.stride(1), cache.stride(2), scales.stride(0), scales.stride(1),
+@@ -78,6 +106,9 @@ def unpack_segment(cache, scales, block_row, start, length, out):
+     if cache.dtype == torch.int8:
+         _unpack_segment_i8[grid](cache, scales, block_row, out, start, length, *strides,
+                                  BLOCK_SIZE=cache.shape[1], HEAD=head, TOKENS=tokens)
++    elif cache.dtype in FP8_DTYPES:
++        _unpack_segment_fp8[grid](cache, scales, block_row, out, start, length, *strides,
++                                  BLOCK_SIZE=cache.shape[1], HEAD=head, TOKENS=tokens)
+     else:
+         _unpack_segment[grid](cache, scales, block_row, out, start, length, *strides,
+                               BLOCK_SIZE=cache.shape[1], HALF=head // 2, TOKENS=tokens)
+diff --git a/vllm_quantpack/attention/int8_prefill.py b/vllm_quantpack/attention/int8_prefill.py
+new file mode 100644
+index 0000000..f0f3a3c
+--- /dev/null
++++ b/vllm_quantpack/attention/int8_prefill.py
+@@ -0,0 +1,172 @@
++"""Long-context prefill over the int8_per_token_head KV cache with FlashAttention.
++
++int8 KV is served only by vLLM's Triton unified-attention kernel, which unpacks the cache codes inside the
++attention loop: on a 33k context that prefill runs at 832 t/s against 1 178 for the int4 path, where a segment is
++unpacked once to bf16 and handed to FlashAttention 2. This module gives int8 the same second path: a request whose
++chunk and context are long enough is walked in SEGMENT-token pieces, each unpacked by
++``int4_prefill.unpack_segment`` (the int8 branch: ``code * scale``, no zero point) and attended by FlashAttention;
++the pieces are folded together by log-sum-exp in fp32.
++
++Decode steps, short chunks, short contexts and the features this path does not cover (sliding window, ALiBi, sinks,
++softcap, FP8 query/descales, R-SWA, chunk lookback, tensor descriptors) stay on the Triton kernel.
++VLLM_QUANTPACK_INT8_FA_PREFILL=0 disables the patch.
++"""
++import itertools
++import os
++
++import torch
++
++from . import int4_prefill
++from .int4_kv import _step_lengths
++
++MIN_QUERY = int4_prefill.MIN_QUERY       # a chunk shorter than this is cheap on the Triton kernel
++MIN_CONTEXT = int4_prefill.MIN_CONTEXT   # below this the Triton kernel is already fast
++
++# Per-token-head caches this hook can unpack: one code per channel, so the same segment kernel serves both. vLLM
++# stores fp8_per_token_head in uint8 and views it as float8 before attention, and both dtypes are one byte wide.
++PTH_KV_DTYPES = tuple(d for d in (torch.int8, getattr(torch, "float8_e4m3fn", None),
++                                  getattr(torch, "float8_e5m2", None)) if d is not None)
++
++
++def _eligible(kw, modes):
++    """True when the call is a plain long causal prefix over an int8/fp8 per-token-head cache."""
++    if not modes or kw.get("kv_quant_mode") not in modes:
++        return False
++    if kw.get("k") is None or kw["k"].dtype not in PTH_KV_DTYPES:
++        return False
++    if kw.get("causal") is not True:                 # per-sequence causal tensors stay on Triton
++        return False
++    if tuple(kw.get("window_size") or (-1, -1)) != (-1, -1):
++        return False
++    if kw.get("max_seqlen_q", 0) < MIN_QUERY or kw.get("max_seqlen_k", 0) < MIN_CONTEXT:
++        return False
++    if kw.get("k_scale_cache") is None or kw.get("v_scale_cache") is None:
++        return False
++    return not (
++        kw.get("softcap")
++        or kw.get("sinks") is not None
++        or kw.get("alibi_slopes") is not None
++        or kw.get("qq_bias") is not None
++        or kw.get("output_scale") is not None
++        or kw.get("mm_prefix_range") is not None
++        or kw.get("rswa_window") is not None
++        or kw.get("chunk_lookback", -1) >= 0
++        or kw.get("use_td", False)
++        or kw.get("q_descale") is not None
++        or kw.get("k_descale") is not None
++        or kw.get("v_descale") is not None
++    )
++
++
++def patch_int8_prefill(logger):
++    if os.environ.get("VLLM_QUANTPACK_INT8_FA_PREFILL", "1") == "0":
++        return False
++    try:
++        from vllm.v1.attention.ops import triton_unified_attention as stock
++        from vllm.v1.kv_cache_interface import KVQuantMode
++        from vllm.vllm_flash_attn import flash_attn_varlen_func
++    except Exception as e:      # no FlashAttention build for this GPU, or a vLLM without the int8 KV mode
++        logger.info("vllm-quantpack: int8 long prefills stay on Triton (%s)", e)
++        return False
++    orig = stock.unified_attention
++    if getattr(orig, "_quantpack_int8", False):
++        return True
++    modes = {m for m in (getattr(KVQuantMode, "INT8_PER_TOKEN_HEAD", None),
++                         getattr(KVQuantMode, "FP8_PER_TOKEN_HEAD", None)) if m is not None}
++
++    def unified_attention(*args, **kw):
++        # triton_attn.py calls this with keyword arguments only; anything else goes straight through.
++        if args or not _eligible(kw, modes):
++            return orig(*args, **kw)
++        q, out = kw["q"], kw["out"]
++        cu, used = _step_lengths(kw["cu_seqlens_q"], kw["seqused_k"])
++        long = [i for i in range(len(used)) if cu[i + 1] - cu[i] >= MIN_QUERY and used[i] >= MIN_CONTEXT]
++        if not long:
++            return orig(**kw)
++        rest = [i for i in range(len(used)) if i not in long and cu[i + 1] > cu[i]]
++        if rest:                   # decode tokens and short prefills of the same step: Triton on a sub-batch
++            rows = torch.cat([torch.arange(cu[i], cu[i + 1], device=q.device) for i in rest])
++            lens = [cu[i + 1] - cu[i] for i in rest]
++            sub_cu = torch.tensor([0, *itertools.accumulate(lens)], dtype=torch.int32, device=q.device)
++            sel = torch.tensor(rest, device=q.device)
++            sub_out = torch.empty((len(rows),) + tuple(out.shape[1:]), dtype=out.dtype, device=out.device)
++            orig(**{**kw, "q": q[rows], "out": sub_out, "cu_seqlens_q": sub_cu,
++                    "max_seqlen_q": max(lens), "seqused_k": kw["seqused_k"][sel],
++                    "block_table": kw["block_table"][sel], "max_seqlen_k": max(used[i] for i in rest)})
++            out[rows] = sub_out
++        for i in long:
++            out[cu[i]:cu[i + 1]] = int4_prefill.prefill_sequence(
++                q[cu[i]:cu[i + 1]], kw["k"], kw["v"], kw["k_scale_cache"], kw["v_scale_cache"],
++                kw["block_table"][i], used[i], kw["softmax_scale"], flash_attn_varlen_func)
++        return None
++
++    unified_attention._quantpack_int8 = True
++    stock.unified_attention = unified_attention
++    try:
++        from vllm.v1.attention.backends import triton_attn
++        if getattr(triton_attn, "unified_attention", None) is orig:
++            triton_attn.unified_attention = unified_attention   # bound at import time in the backend module
++    except Exception as e:
++        logger.warning("vllm-quantpack: int8 prefill hook not visible to the backend (%s)", e)
++    logger.info("vllm-quantpack: int8/fp8 per-token-head long prefills run FlashAttention over unpacked segments")
++    return True
++
++
++PTH_DTYPES = ("int8_per_token_head", "fp8_per_token_head")
++
++
++def _segments_from_env(logger):
++    """Segments per sequence for the int8 split-KV decode: the env value, or auto from the SM count."""
++    env = (os.environ.get("VLLM_QUANTPACK_INT8_SEGMENTS") or "auto").strip()
++    try:
++        from .int4_kv import segments_for
++        if not torch.cuda.is_available():
++            return 0
++        segments = (segments_for(torch.cuda.get_device_properties(0).multi_processor_count)
++                    if env.lower() == "auto" else int(env))
++    except Exception as e:
++        logger.warning("vllm-quantpack: int8 split-KV segments left stock (%s)", e)
++        return 0
++    if segments < 1 or segments & (segments - 1):
++        logger.warning("vllm-quantpack: int8 split-KV segments must be a power of two, got %d", segments)
++        return 0
++    return segments
++
++
++def patch_int8_segments(logger):
++    """Size the int8 split-KV scratch buffers for more segments so the decode grid fills the SMs.
++
++    vLLM keeps NUM_PAR_SOFTMAX_SEGMENTS = 16 for every dtype, and the metadata builder reads that global once in
++    __init__ to size the per-segment scratch (rows x heads x segments x head size). Raising it gives the decode
++    grid num_q_blocks x num_kv_heads x segments programs instead of x16; on the 27B shape (4 KV heads, 24 query
++    heads, head 256) 16 segments leave most of the SMs idle. VLLM_QUANTPACK_INT8_SEGMENTS sets the number
++    directly ("auto" takes it from the SM count, the same rule the int4 decode uses).
++    """
++    segments = _segments_from_env(logger)
++    if not segments:
++        return False
++    try:
++        from vllm.v1.attention.backends import triton_attn
++        builder = triton_attn.TritonAttentionMetadataBuilder
++        stock_init = builder.__init__
++        triton_attn.NUM_PAR_SOFTMAX_SEGMENTS     # the anchor this relies on
++    except Exception as e:
++        logger.info("vllm-quantpack: int8 split-KV segments left stock (%s)", e)
++        return False
++    if getattr(stock_init, "_quantpack_int8_segments", False):
++        return True
++
++    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
++        if vllm_config.cache_config.cache_dtype not in PTH_DTYPES:
++            return stock_init(self, kv_cache_spec, layer_names, vllm_config, device)
++        saved = triton_attn.NUM_PAR_SOFTMAX_SEGMENTS
++        triton_attn.NUM_PAR_SOFTMAX_SEGMENTS = segments   # read once, in __init__, to size the buffers
++        try:
++            stock_init(self, kv_cache_spec, layer_names, vllm_config, device)
++        finally:
++            triton_attn.NUM_PAR_SOFTMAX_SEGMENTS = saved
++
++    __init__._quantpack_int8_segments = True
++    builder.__init__ = __init__
++    logger.info("vllm-quantpack: int8_per_token_head split-KV decode uses %d segments", segments)
++    return True
