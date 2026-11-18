@@ -103,5 +103,12 @@ that sets vLLM's decode at 85 tok/s at 33k once the 15.4 GB of weights are added
 
 The wheels built from that run: `dist/flashinfer_jit_cache_sm80-0.7.5rc3+win.1-cp39-abi3-win_amd64.whl`
 (27.5 MB, 33 modules) and the 3.4 KB discovery shim `flashinfer_jit_cache-0.7.5rc3+win.1-py3-none-any.whl`.
-Both must be installed together — without the shim the provider is invisible and `providers: 0`.
+Both are published as a **pre-release**:
+<https://github.com/Astemiir/flashinfer-windows/releases/tag/v0.7.5rc3-win.1> — marked pre-release on purpose,
+so `0.7.2.post1-win.1` stays the recommended build. Install both together: without the shim the provider is
+invisible and `providers: 0`.
+
+Engine comparison (vLLM 0.33, `fp8_e4m3` + `FLASHINFER`, 131 072 window, MTP n3): 33 366 tokens —
+1 194.8 / 81.5 on 0.7.5rc3 versus 1 182 / 81.8 on 0.7.2.post1; 97 728 tokens — 910.8 / 66.8 versus
+912.1 / 68.4. Equal within noise, as expected for a release line aimed at Blackwell and Rubin.
 
