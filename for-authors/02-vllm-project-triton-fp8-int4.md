@@ -10,7 +10,7 @@ They are independent; the first comes with a patch, the second is a question.
 
 ## 1. `fp8_per_token_head` KV cache cannot start on SM 8.x
 
-**File:** `vllm/v1/attention/backends/triton_attn.py:525`, `TritonAttentionImpl.__init__`.
+**File:** `vllm/v1/attention/backends/triton_attn.py:517` on `main` (525 in 0.33), `TritonAttentionImpl.__init__`.
 
 ```python
             if self.kv_cache_dtype.startswith("fp8") and not (
@@ -52,7 +52,7 @@ FlashInfer" is a perfectly good answer; we would then just stop advertising the 
 
 ## 2. Question: int4 KV with speculative decoding is pinned to the 2D path
 
-**File:** `vllm/v1/attention/backends/triton_attn.py:169-180`.
+**File:** `vllm/v1/attention/backends/triton_attn.py:164-175` on `main` (169-180 in 0.33).
 
 ```python
         max_query_len_3d = 1
