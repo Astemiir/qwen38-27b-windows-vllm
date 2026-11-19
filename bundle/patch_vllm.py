@@ -2,6 +2,10 @@ r"""Apply the fp8 per-token-head guard fix to vLLM inside the Windows kit.
 
     python\python.exe patch_vllm.py <kit-root>
 
+Not called by install.bat any more, and not recommended: the widened guard gave correct output on a 27B
+but garbled text on a 9B GPTQ build, so the dtype is shape-dependent and the refusal is safer. Kept only
+because our own fp8_per_token_head numbers were taken with it.
+
 Idempotent: if the guard already mentions per_token_head, nothing is written. A .bak-<today> copy of
 the file is left next to it, so the change can be undone by renaming.
 """

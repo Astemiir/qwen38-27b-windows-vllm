@@ -171,15 +171,11 @@ CJK code pages (cp936/932/949) and UTF-8 avoid it.
 Check after starting the server (step 4): the log must contain **`KV attention fixed`**, not
 `left stock`.
 
-**Optional — only for `fp8_per_token_head` on the Triton backend.** Stock vLLM rejects that dtype on
-cards below SM89, one predicate too wide. Apply the one-guard patch from the same directory:
-
-```bat
-git apply -p1 <path-to-this-repo>\patches\vllm\vllm-triton-fp8-per-token-head-guard.patch
-```
-
-It is not required for `int4`, `k8v4`, `int8` or `fp8_e4m3` through FlashInfer, and it buys no speed —
-`fp8_per_token_head` measures a tie with int8. Skip it unless you specifically want that dtype.
+**`fp8_per_token_head` — do not use it.** Stock vLLM refuses that dtype below SM89 by design. Widening the
+check does start the engine, but the output is not trustworthy: it answered correctly on our 27B and came
+out garbled on a 9B GPTQ build, so the refusal is the only safe behaviour. Use `int8_per_token_head`, or
+`fp8_e4m3` with `--attention-backend FLASHINFER` (step 2). The patch that used to lift the guard has been
+withdrawn.
 
 ## Step 4 — model and launch
 
@@ -262,7 +258,7 @@ above 1.00× for the requested window to fit.
 | ------------------------------------------------------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | decode is ~28 tok/s on `int4`                          | 2D fallback: scratch too small for the speculative batch          | `--max-num-seqs 8` (or ≥ `1 + num_speculative_tokens`)                                                            |
 | log says `attention left stock`                        | the plugin could not write its generated kernel (code page)       | apply the `encoding="utf-8"` edit from step 3                                                                     |
-| `native FP8 (fp8e4nv) requires SM89+`                  | stock Triton on an 8.x card                                       | use `--attention-backend FLASHINFER` (step 2), or the guard patch in `UPSTREAM-FIXES.md` for `fp8_per_token_head` |
+| `native FP8 (fp8e4nv) requires SM89+`                  | stock Triton on an 8.x card                                       | use `--attention-backend FLASHINFER` (step 2) with `fp8_e4m3`; `fp8_per_token_head` is not usable on these cards |
 | `kv_cache_dtype not supported` for `int8` + FLASHINFER | FlashInfer has no int8 KV path with per-token-head scales         | use `fp8_e4m3` — same 1 byte/element                                                                              |
 | `GPU mapping OOM` at startup                           | `expandable_segments`                                             | clear `PYTORCH_CUDA_ALLOC_CONF`                                                                                   |
 | `Engine core initialization failed` in ~5 s            | a JIT kernel failed to build (e.g. `topk` with a drafter)         | use MTP instead of DFlash2, or install the topk opt-out patch in `UPSTREAM-FIXES.md`                              |

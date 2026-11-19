@@ -6,7 +6,7 @@ place and a suggested title; the body below it is the message.
 | file                                   | addressee            | where                                      | what it asks for                                                                           |
 | -------------------------------------- | -------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | `01-jorge-vllm-quantpack.md`           | Jorge Ramírez Espejo | new issue in `jramirez-uab/vllm-quantpack` | the encoding fix that re-enables his own int4 fast kernel; offer of a PR                   |
-| `02-vllm-project-triton-fp8-int4.md`   | vLLM maintainers     | new issue (two sections)                   | one guard predicate too wide for `fp8_per_token_head`; a question about int4 + speculation |
+| `02-vllm-project-triton-fp8-int4.md`   | vLLM maintainers     | posted as vllm#68410                       | int4 + speculation question; the `fp8_per_token_head` guard item is withdrawn              |
 | `03-aivrar-windows-build.md`           | Chris (aivrar)       | comment in #20                             | the two doc lines that still say FlashInfer has no Windows wheel; what now exists          |
 | `04-flashinfer-ai-windows-jit.md`      | FlashInfer upstream  | new issue                                  | five mechanical Windows blockers, with the artifact-suffix and `spec.build()` notes        |
 | `05-systempanic-flashinfer-windows.md` | SystemPanic          | comment in #14                             | the delta from `v0.7.0.post1` to `v0.7.2.post1`, offered as a patch                        |

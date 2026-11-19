@@ -24,7 +24,7 @@ in one pass).
 | 4. Kept the port anyway. | At equal KV it gives +18 % prefill, and it is the only backend that can hold an fp8 cache on this card: 1 182 / 81.8 at 131k. |
 | 5. Fixed the int4 plugin. Two gates, both silent: it wrote its generated kernel through the ANSI code page (the source has a `→` character, the write failed, the fast kernel was skipped), and its split-KV scratch was too small for 4 verify tokens. | 858 / 28.0 became 1 178 / 85.5 at a 33k fill, and 262 144 tokens of context fit in 6.8 GB of KV. |
 | 6. Wrote an int8 prefill kernel: unpack the prefix, then hand it to FlashAttention. | 828 → 1 172 tok/s prefill. Decode did not change. Stock Triton now matches FlashInfer on prefill. |
-| 7. Checked `fp8_per_token_head`: the guard blocked it, we removed the guard. | It starts and answers correctly, but it ties int8 (1 185 / 76.8). No speed win, so we stopped advertising it. |
+| 7. Checked `fp8_per_token_head`: the guard blocked it, we widened the guard and measured. | On our 27B it starts and answers correctly, but ties int8 (1 185 / 76.8), so there is nothing to win. On a 9B GPTQ build the same widened guard produced garbled text, so we withdrew the change and left the refusal alone. |
 
 ## The numbers: patched against stock
 
@@ -56,7 +56,8 @@ The same formats at deeper fills:
 - **DFlash2.** It was the whole reason for the port and it is slower than MTP at every depth we tried.
 - **`--max-num-seqs 8` on stock vLLM.** It does nothing there: 28.0 tok/s at 2 sequences, 29.3 at 8. The flag
   gates the plugin's launcher, not vLLM's own path.
-- **`fp8_per_token_head`.** Starts after the guard fix, ties int8, so it buys nothing.
+- **`fp8_per_token_head`.** Ties int8 on our model, and the guard turns out to be right: on a 9B GPTQ
+  build the widened check returns garbled text. Withdrawn.
 - **The int8 split-KV knob.** Decode is limited by int8 arithmetic there, not by parallelism; more segments
   changed nothing.
 

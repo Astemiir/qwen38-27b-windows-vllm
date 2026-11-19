@@ -107,7 +107,7 @@ On stock vLLM no launch flag changes this; `--max-num-seqs 8` is our bundle's se
 launcher is what reads that scratch size. It costs nothing: at 8 sequences the 262k stand held 319 815
 tokens of cache.
 
-## 3. `vllm-project/vllm` — fp8 KV with per-token-head scales is rejected on `sm_86`
+## 3. `vllm-project/vllm` — fp8 KV with per-token-head scales is refused on `sm_86`, and the guard is right
 
 **File:** `vllm/v1/attention/backends/triton_attn.py`, line 525, inside the `TritonAttentionImpl`
 constructor.
@@ -123,27 +123,22 @@ constructor.
                     f"FP8 KV cache is not supported by the Triton attention backend "
 ```
 
-**Replace the first three lines with:**
+The guard protects the *native* `fp8e4nv` path, where the kernel does the scaled dot product in fp8. A
+`fp8_per_token_head` cache is not that: it is stored as `torch.uint8`, viewed as `float8_e4m3fn`, and
+dequantized with an explicit per-head, per-token scale inside the Triton kernel. That is why we first
+read the guard as one predicate too wide, widened it with
+`and not self.kv_cache_dtype.endswith("per_token_head")`, and measured the result.
 
-```python
-            if (
-                self.kv_cache_dtype.startswith("fp8")
-                and not self.kv_cache_dtype.endswith("per_token_head")
-                and not (current_platform.has_device_capability(89))
-            ):
-```
+On a Qwen3.8-27B (head_dim 256, 4 KV heads) the widened check gave correct answers in three controls —
+MTP 3 with CUDA graphs, no speculation, and `--enforce-eager` — with a needle found at 33 350 tokens each
+time, and with every attention hook of `vllm-quantpack` switched off. Speed was 1 185 / 76.8 at a 33k
+fill and 965 / 51.6 at 99k, no better than patched int8.
 
-**Where it breaks.** The guard protects the *native* `fp8e4nv` path, where the kernel does the scaled
-dot product in fp8. A `fp8_per_token_head` cache is not that: it is stored as `torch.uint8`, viewed as
-`float8_e4m3fn`, and dequantized with an explicit per-head, per-token scale inside the Triton kernel —
-the same arithmetic that `int8_per_token_head` already uses and that already runs on `sm_86`. The guard
-is one dtype predicate too wide, so a working configuration cannot start.
-
-Once widened, `fp8_per_token_head` runs and produces correct output; it is not faster than int8
-(1 185 versus 1 172 tok/s prefill, 76.8 versus 76.0 decode), but it starts.
-
-**Verify:** `--attention-backend TRITON_ATTN --kv-cache-dtype fp8_per_token_head` reaches
-"Application startup complete" and a needle test passes.
+Then the maintainer of the Windows build tested the same widened check on a Qwen3.5-9B GPTQ-4bit in eager
+mode and got garbled text (`'Sunz $ initial … 执 moments …'`) with the needle missing. Two shapes, two
+outcomes: the dequant is shape-dependent and not reliable, and a `ValueError` at startup is a better
+failure mode than quietly wrong tokens. **No patch proposed.** For Windows users the documented way
+forward is `int8_per_token_head`, or `fp8_e4m3` with `--attention-backend FLASHINFER` and the wheels.
 
 ## 4. `aivrar/vllm-windows-build` — documentation
 
@@ -187,18 +182,10 @@ Add two sections, because both failures are silent:
 
 > ### `FP8 KV cache is not supported by the Triton attention backend … requires SM89+`
 >
-> The `TRITON_ATTN` guard rejects every dtype starting with `fp8`. For `fp8_per_token_head` this is too
-> wide — that format is stored as `uint8` and dequantized with per-token scales in the kernel, so it
-> does not need native fp8 tensor cores. Either use `--attention-backend FLASHINFER` with
-> `--kv-cache-dtype fp8_e4m3`, or widen the guard in
-> `vllm/v1/attention/backends/triton_attn.py:525` with
-> `and not kv_cache_dtype.endswith("per_token_head")`.
-
-### 4c. Optional one-line patch
-
-Item 3 above applies unchanged to the wheel shipped in the kit. It is included as
-`patches/vllm-triton-fp8-per-token-head-guard.patch` so the kit can carry it without waiting for
-upstream.
+> The refusal is correct: widening the check starts the engine, but the plain kit then returns unusable
+> text on an RTX 3090 (a 9B GPTQ-4bit build in eager mode produces `'Sunz $ initial …'` and misses a
+> 16k needle). Use `--kv-cache-dtype int8_per_token_head`, or `--kv-cache-dtype fp8_e4m3` with
+> `--attention-backend FLASHINFER` and the community wheels.
 
 ## 5. `flashinfer-ai/flashinfer` — Windows JIT
 

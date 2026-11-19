@@ -1,14 +1,15 @@
 # For the vLLM project
 
-<!-- Post as: one issue with two sections, or split in two — the first is a patch, the second a question.
-     Replace https://github.com/Astemiir/qwen38-27b-windows-vllm with the published repository URL first.
-     Title: Triton backend rejects fp8_per_token_head on SM 8.x — the guard is one dtype predicate too wide
+<!-- Posted as vllm-project/vllm#68410. Item 1 was withdrawn there after the 9B result; this file is the
+     final state, not the original text. Item 2 also carries a correction comment (the 23.6 → 85.5 pair
+     belongs to the plugin's launcher, not to vLLM's 3D branch).
+     Title as posted: Triton backend rejects fp8_per_token_head on SM 8.x — the guard is one dtype predicate too wide
 -->
 
 Two items from running vLLM 0.33 with quantized KV caches on an RTX 3090 (`sm_86`) under Windows.
-They are independent; the first comes with a patch, the second is a question.
+The first is withdrawn, the second is still a question.
 
-## 1. `fp8_per_token_head` KV cache cannot start on SM 8.x
+## 1. `fp8_per_token_head` KV cache cannot start on SM 8.x — withdrawn
 
 **File:** `vllm/v1/attention/backends/triton_attn.py:517` on `main` (525 in 0.33), `TritonAttentionImpl.__init__`.
 
@@ -26,29 +27,26 @@ They are independent; the first comes with a patch, the second is a question.
 With `--attention-backend TRITON_ATTN --kv-cache-dtype fp8_per_token_head` on a 3090 this raises at
 startup, before any weight is loaded.
 
-**Why the guard does not apply to this dtype.** The guard protects the native `fp8e4nv` path, where the
+**Why we thought the guard did not apply.** The guard protects the native `fp8e4nv` path, where the
 kernel performs the scaled dot product in fp8 and therefore needs SM89 tensor-core support.
 `fp8_per_token_head` is not that: the cache is stored as `torch.uint8`, viewed as `float8_e4m3fn`, and
 dequantized inside the Triton kernel with an explicit per-head, per-token scale — the same arithmetic
 `int8_per_token_head` already uses, and which already runs on the same card through the same backend.
-The condition is one dtype predicate too wide.
 
-**Suggested change:**
+**What we measured, and why this item is withdrawn.** We widened the condition with
+`and not self.kv_cache_dtype.endswith("per_token_head")`. On a Qwen3.8-27B (head_dim 256, 4 KV heads) that
+gives correct answers in three controls — MTP 3 with CUDA graphs, no speculation, `--enforce-eager` — with
+the needle found at 33 350 tokens each time, at 1 185 / 76.8 against `int8_per_token_head`'s 1 172 / 76.0,
+a tie with no speed to win. Then the maintainer of the Windows build ran the same widened check on a
+Qwen3.5-9B GPTQ-4bit in eager mode: the engine starts, the text comes out as
+`'Sunz $ initial … 执 moments …'`, and the needle misses.
 
-```python
-            if (
-                self.kv_cache_dtype.startswith("fp8")
-                and not self.kv_cache_dtype.endswith("per_token_head")
-                and not (current_platform.has_device_capability(89))
-            ):
-```
+Two shapes, two outcomes means the dequant is shape-dependent and not reliable. A `ValueError` at startup
+is a better failure mode than quietly wrong tokens, so **we withdraw the patch and the suggestion**. If
+you ever chase it, the useful data point is the shape difference: 27B with head_dim 256 and 4 KV heads is
+fine, 9B GPTQ-4bit is not.
 
-**What it buys, stated honestly:** nothing in speed. With the guard widened the configuration starts,
-answers a needle test correctly, and measures 1 185 / 76.8 tok/s against `int8_per_token_head`'s
-1 172 / 76.0 at a 33 350-token fill — a tie. The native `fp8e4nv` path keeps its SM89 requirement. So this
-is about a valid configuration being rejected, not about a faster one. If the maintainers prefer the
-guard to stay as a hard rule for every fp8 dtype, closing this with "use int8_per_token_head or
-FlashInfer" is a perfectly good answer; we would then just stop advertising the dtype.
+**Suggested change:** none.
 
 ## 2. Question: int4 KV with speculative decoding is pinned to the 2D path
 

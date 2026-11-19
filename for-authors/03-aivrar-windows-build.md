@@ -67,10 +67,11 @@ for example:
   split-KV launcher exists in the `vllm-quantpack` plugin, which is where this belongs rather than in the
   kit's docs — with the plugin's encoding fixed (U+2192 written through the ANSI code page) and
   `--max-num-seqs 8` the same stand gives 85.5.
-- **`FP8 KV cache is not supported by the Triton attention backend … requires SM89+`** — the guard is one
-  predicate too wide for `fp8_per_token_head` (that dtype dequantizes with per-token scales, it does not
-  need native fp8 tensor cores). Either use `--attention-backend FLASHINFER`, or widen the condition with
-  `and not kv_cache_dtype.endswith("per_token_head")`.
+- **`FP8 KV cache is not supported by the Triton attention backend … requires SM89+`** — the refusal is
+  correct and we no longer ask for it to be lifted: widening the check starts the engine, but your 9B run
+  returned garbled text while our 27B answered correctly, so the dequant is shape-dependent. The entry
+  should send people to `--kv-cache-dtype int8_per_token_head`, or `fp8_e4m3` with
+  `--attention-backend FLASHINFER`.
 
 ## 3. Optional, if you want the kit to carry it
 
