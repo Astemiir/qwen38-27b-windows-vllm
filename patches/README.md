@@ -13,9 +13,10 @@ one new module.
 | `quantpack/attention/int8_prefill.py`             | `vllm_quantpack/attention/` | new module, 8.8 KB      | included inside the first patch; here for hand installs |
 | `vllm/vllm-triton-fp8-per-token-head-guard.patch` | vLLM 0.33                   | 1 guard, +4 / −3 lines  | **withdrawn — measurement only, see below**             |
 
-**`fp8_per_token_head` is not a supported mode.** Widening the guard starts the engine, but the output is
-shape-dependent: correct on our 27B (head_dim 256, 4 KV heads) in three controls, garbled on a 9B GPTQ-4bit
-build in eager mode with the needle missed. Use `int8_per_token_head`, or `fp8_e4m3` with
+**`fp8_per_token_head` is not a supported mode.** Widening the guard starts the engine, but on a
+Qwen3.5-9B with `--enforce-eager` the first request after startup returns garbage and later ones are
+correct; the same model with CUDA graphs, and a 27B in either mode, answer correctly. A server that is
+wrong once per start is not usable, so the patch is withdrawn. Use `int8_per_token_head`, or `fp8_e4m3` with
 `--attention-backend FLASHINFER`. The patch stays in the repository only because our own measurements were
 taken with it; do not install it on a machine you rely on.
 

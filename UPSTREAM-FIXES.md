@@ -134,11 +134,18 @@ MTP 3 with CUDA graphs, no speculation, and `--enforce-eager` — with a needle 
 time, and with every attention hook of `vllm-quantpack` switched off. Speed was 1 185 / 76.8 at a 33k
 fill and 965 / 51.6 at 99k, no better than patched int8.
 
-Then the maintainer of the Windows build tested the same widened check on a Qwen3.5-9B GPTQ-4bit in eager
-mode and got garbled text (`'Sunz $ initial … 执 moments …'`) with the needle missing. Two shapes, two
-outcomes: the dequant is shape-dependent and not reliable, and a `ValueError` at startup is a better
-failure mode than quietly wrong tokens. **No patch proposed.** For Windows users the documented way
-forward is `int8_per_token_head`, or `fp8_e4m3` with `--attention-backend FLASHINFER` and the wheels.
+Then we reproduced it on a Qwen3.5-9B in both 4-bit packs, AWQ and GPTQ, with `--enforce-eager`: the
+**first** request after startup returns garbage (`'Sunz $ initial … 执 moments …'`, a 17k needle answering
+`'The engine is is a the engine's first lines up to READY'`) and **every later request is correct**. With
+CUDA graphs the first request is fine, and a Qwen3.8-27B answered correctly in both modes. Our earlier
+controls always began with a warm-up request, which is exactly why they missed it.
+
+A server that answers the first question with noise is worse than one that refuses to start, so **no patch
+proposed** — and the guard, on reflection, was right for the wrong reason. For Windows users the documented
+way forward is `int8_per_token_head`, or `fp8_e4m3` with `--attention-backend FLASHINFER` and the wheels.
+If the first-call behaviour is worth an upstream report, the reproducible pair is: 9B, `--enforce-eager`,
+`fp8_per_token_head`, guard widened, first request garbles, second does not — which points at Triton
+autotuning on the first launch rather than at the dequant itself.
 
 ## 4. `aivrar/vllm-windows-build` — documentation
 

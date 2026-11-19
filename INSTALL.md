@@ -172,10 +172,10 @@ Check after starting the server (step 4): the log must contain **`KV attention f
 `left stock`.
 
 **`fp8_per_token_head` — do not use it.** Stock vLLM refuses that dtype below SM89 by design. Widening the
-check does start the engine, but the output is not trustworthy: it answered correctly on our 27B and came
-out garbled on a 9B GPTQ build, so the refusal is the only safe behaviour. Use `int8_per_token_head`, or
-`fp8_e4m3` with `--attention-backend FLASHINFER` (step 2). The patch that used to lift the guard has been
-withdrawn.
+check starts the engine, but on a 9B with `--enforce-eager` the first request after startup comes back as
+noise (later requests are fine, and CUDA graphs avoid it), so the refusal is the only safe behaviour. Use
+`int8_per_token_head`, or `fp8_e4m3` with `--attention-backend FLASHINFER` (step 2). The patch that used to
+lift the guard has been withdrawn.
 
 ## Step 4 — model and launch
 
