@@ -24,7 +24,7 @@ in one pass).
 | 4. Kept the port anyway. | At equal KV it gives +18 % prefill, and it is the only backend that can hold an fp8 cache on this card: 1 182 / 81.8 at 131k. |
 | 5. Fixed the int4 plugin. Two gates, both silent: it wrote its generated kernel through the ANSI code page (the source has a `→` character, the write failed, the fast kernel was skipped), and its split-KV scratch was too small for 4 verify tokens. | 858 / 28.0 became 1 178 / 85.5 at a 33k fill, and 262 144 tokens of context fit in 6.8 GB of KV. |
 | 6. Wrote an int8 prefill kernel: unpack the prefix, then hand it to FlashAttention. | 828 → 1 172 tok/s prefill. Decode did not change. Stock Triton now matches FlashInfer on prefill. |
-| 7. Checked `fp8_per_token_head`: the guard blocked it, we widened the guard and measured. | On our 27B it answers correctly and ties int8 (1 185 / 76,8), so there is nothing to win. On a 9B with `--enforce-eager` the first request after startup comes back as noise; we withdrew the change. |
+| 7. Checked `fp8_per_token_head`: the guard blocked it, we widened the guard and measured. | It only ties int8 (1 185 / 76,8 against 1 172 / 76,0). Along the way we found that every per-token-head dtype answers the first request after a real start with noise in eager mode — a warm-up request or CUDA graphs fixes that, but the dtype still buys nothing, so the change was withdrawn. |
 
 ## The numbers: patched against stock
 
@@ -56,8 +56,9 @@ The same formats at deeper fills:
 - **DFlash2.** It was the whole reason for the port and it is slower than MTP at every depth we tried.
 - **`--max-num-seqs 8` on stock vLLM.** It does nothing there: 28.0 tok/s at 2 sequences, 29.3 at 8. The flag
   gates the plugin's launcher, not vLLM's own path.
-- **`fp8_per_token_head`.** Ties int8 on our model, and the guard turns out to be right: on a 9B in eager
-  mode the first request after startup returns noise. Withdrawn.
+- **`fp8_per_token_head`.** Ties int8 on our model, so there is nothing to win. Withdrawn. (Its first-request
+  noise in eager mode turned out to be a property of all per-token-head dtypes, not of fp8 — a warm-up
+  request or CUDA graphs removes it.)
 - **The int8 split-KV knob.** Decode is limited by int8 arithmetic there, not by parallelism; more segments
   changed nothing.
 

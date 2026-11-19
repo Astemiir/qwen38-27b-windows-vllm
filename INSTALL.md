@@ -171,9 +171,10 @@ CJK code pages (cp936/932/949) and UTF-8 avoid it.
 Check after starting the server (step 4): the log must contain **`KV attention fixed`**, not
 `left stock`.
 
-**`fp8_per_token_head` — do not use it.** Stock vLLM refuses that dtype below SM89 by design. Widening the
-check starts the engine, but on a 9B with `--enforce-eager` the first request after startup comes back as
-noise (later requests are fine, and CUDA graphs avoid it), so the refusal is the only safe behaviour. Use
+**`fp8_per_token_head` — do not use it.** Stock vLLM refuses that dtype below SM89, and that is fine: it
+only ties int8 anyway (1 185 / 76.8 at a 33k fill). On top of that, every per-token-head dtype — `int8`,
+`int4`, `fp8` — answers the first request after startup with noise in `--enforce-eager` mode; with CUDA
+graphs, or after one `max_tokens=1` warm-up request, all of them are correct. Use
 `int8_per_token_head`, or `fp8_e4m3` with `--attention-backend FLASHINFER` (step 2). The patch that used to
 lift the guard has been withdrawn.
 

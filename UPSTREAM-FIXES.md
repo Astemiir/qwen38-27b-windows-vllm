@@ -134,18 +134,20 @@ MTP 3 with CUDA graphs, no speculation, and `--enforce-eager` — with a needle 
 time, and with every attention hook of `vllm-quantpack` switched off. Speed was 1 185 / 76.8 at a 33k
 fill and 965 / 51.6 at 99k, no better than patched int8.
 
-Then we reproduced it on a Qwen3.5-9B in both 4-bit packs, AWQ and GPTQ, with `--enforce-eager`: the
-**first** request after startup returns garbage (`'Sunz $ initial … 执 moments …'`, a 17k needle answering
-`'The engine is is a the engine's first lines up to READY'`) and **every later request is correct**. With
-CUDA graphs the first request is fine, and a Qwen3.8-27B answered correctly in both modes. Our earlier
-controls always began with a warm-up request, which is exactly why they missed it.
+Then we measured the first request of every mode, and the picture changed twice. With `--enforce-eager`,
+the **first** request after startup returns noise for every **per-token-head** dtype — `int8`, `int4`,
+`fp8` — and every later request is correct; `bfloat16` and `fp8_e4m3` through FlashInfer are clean. With
+CUDA graphs all five are clean, because graphs exercise the kernels at capture. Reproduced on a 27B and a
+9B, both 4-bit. Our earlier controls always opened with a warm-up request, which is why none of this showed
+up before, and the 27B looked immune only because the first request there happened to carry a 33k-token
+prompt.
 
-A server that answers the first question with noise is worse than one that refuses to start, so **no patch
-proposed** — and the guard, on reflection, was right for the wrong reason. For Windows users the documented
-way forward is `int8_per_token_head`, or `fp8_e4m3` with `--attention-backend FLASHINFER` and the wheels.
-If the first-call behaviour is worth an upstream report, the reproducible pair is: 9B, `--enforce-eager`,
-`fp8_per_token_head`, guard widened, first request garbles, second does not — which points at Triton
-autotuning on the first launch rather than at the dequant itself.
+So this is not an fp8 defect: it is a first-call defect of the per-token-head path, and the fix is a
+`max_tokens=1` request after startup (it returns noise and absorbs the fault) or leaving graphs on. That
+also means **no patch to the guard is warranted** — beyond the first call, `fp8_per_token_head` still only
+ties int8 (1 185 / 76.8 against 1 172 / 76.0) and loses decode to `fp8_e4m3` through FlashInfer
+(81.8). For Windows users the documented way forward stays `int8_per_token_head`, or `fp8_e4m3` with
+`--attention-backend FLASHINFER` and the wheels.
 
 ## 4. `aivrar/vllm-windows-build` — documentation
 

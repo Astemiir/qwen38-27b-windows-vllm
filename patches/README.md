@@ -13,12 +13,13 @@ one new module.
 | `quantpack/attention/int8_prefill.py`             | `vllm_quantpack/attention/` | new module, 8.8 KB      | included inside the first patch; here for hand installs |
 | `vllm/vllm-triton-fp8-per-token-head-guard.patch` | vLLM 0.33                   | 1 guard, +4 / −3 lines  | **withdrawn — measurement only, see below**             |
 
-**`fp8_per_token_head` is not a supported mode.** Widening the guard starts the engine, but on a
-Qwen3.5-9B with `--enforce-eager` the first request after startup returns garbage and later ones are
-correct; the same model with CUDA graphs, and a 27B in either mode, answer correctly. A server that is
-wrong once per start is not usable, so the patch is withdrawn. Use `int8_per_token_head`, or `fp8_e4m3` with
-`--attention-backend FLASHINFER`. The patch stays in the repository only because our own measurements were
-taken with it; do not install it on a machine you rely on.
+**`fp8_per_token_head` is not worth having.** Even without the guard it only ties int8 — 1 185 / 76.8
+against 1 172 / 76.0 at a 33k fill — and loses decode to `fp8_e4m3` through FlashInfer (81.8). On top of
+that, every per-token-head dtype (`int8`, `int4`, `fp8`) answers the **first** request after startup with
+noise when `--enforce-eager` is set, and is correct from the second request on; `bfloat16` and `fp8_e4m3`
+are clean, and CUDA graphs avoid it. One `max_tokens=1` request after startup absorbs the fault. Use
+`int8_per_token_head` (with graphs or a warm-up) or `fp8_e4m3` with `--attention-backend FLASHINFER`. The
+patch stays here only because our own measurements were taken with it.
 
 Both patches were generated from the published wheels, not from a working tree, and both were checked
 with `git apply --check` against a clean extraction.
